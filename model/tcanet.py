@@ -2,7 +2,7 @@ import torch
 import logging
 from torch import nn
 import torch.nn.functional as F
-from model.tcn_block import TemporalConvNet
+from tcn_block import TemporalConvNet
 # from model.pe import PositionEmbedding
 # from model.optimizations import VariationalDropout, WeightDropout
 
@@ -14,31 +14,40 @@ logging.basicConfig( \
 
 class TCANet(nn.Module):
 
-    def __init__(self, emb_size, input_output_size, num_channels, seq_len, num_sub_blocks, temp_attn, nheads, en_res,
+    def __init__(self, emb_size, input_output_size, num_channels, num_features, num_sub_blocks, temp_attn, nheads, en_res,
                  conv, key_size, kernel_size=2, dropout=0.3, wdrop=0.0, emb_dropout=0.1, tied_weights=False, 
                  dataset_name=None, visual=True):
+        """
+        Parameters:
+        -----------------------------------
+        emb_size: words embedding fearures. e.g.64.
+        key_size: num of features to do product of attention. e.g.64.
+
+
+        """
         super(TCANet, self).__init__()
         self.temp_attn = temp_attn
         self.dataset_name = dataset_name
         self.num_levels = len(num_channels)
-        self.word_encoder = nn.Embedding(input_output_size, emb_size)
-        if dataset_name == 'mnist':
-            self.word_encoder = nn.Embedding(256, emb_size)
+        # self.word_encoder = nn.Embedding(input_output_size, emb_size)
+        # if dataset_name == 'mnist':
+        #     self.word_encoder = nn.Embedding(256, emb_size)
         # self.position_encoder = PositionEmbedding(emb_size, seq_len)
+        self.encoder = nn.Linear(num_features, emb_size)
         self.tcanet = TemporalConvNet(input_output_size, emb_size, num_channels, \
             num_sub_blocks, temp_attn, nheads, en_res, conv, key_size, kernel_size, visual=visual, dropout=dropout)
         # self.tcanet = WeightDropout(self.tcanet, self.get_conv_names(num_channels), wdrop)
         # self.drop = VariationalDropout(emb_dropout) # drop some embeded features, e.g. [16,80,600]->[16,80,421]
         self.drop = nn.Dropout(emb_dropout)
         self.decoder = nn.Linear(num_channels[-1], input_output_size)
-        if tied_weights:
-            if self.dataset_name != 'mnist':
-                self.decoder.weight = self.word_encoder.weight
+        # if tied_weights:
+        #     if self.dataset_name != 'mnist':
+        #         self.decoder.weight = self.word_encoder.weight
         self.emb_dropout = emb_dropout
         self.init_weights()
 
     def init_weights(self):
-        self.word_encoder.weight.data.normal_(0, 0.01)
+        # self.word_encoder.weight.data.normal_(0, 0.01)
         self.decoder.bias.data.fill_(0)
         self.decoder.weight.data.normal_(0, 0.01)
 
@@ -53,27 +62,21 @@ class TCANet(nn.Module):
         """Input ought to have dimension (N, C_in, L_in), where L_in is the seq_len; here the input is (N, L, C)"""
         # input: [batchsize, seq_len]
         # emb = self.drop(torch.cat([self.word_encoder(input), self.position_encoder(input)], dim=2))
-        if self.dataset_name == 'mnist':
-            # emb = self.drop(self.word_encoder(input))
-            if self.temp_attn:
-                y, attn_weight_list = self.tcanet(input) # input should have dimension (N, C, L)
-                # y, attn_weight_list = self.tcanet(emb.transpose(1, 2)) # input should have dimension (N, C, L)
-                o = self.decoder(y[:, :, -1])
-                # return F.log_softmax(o, dim=1).contiguous(), [attn_weight_list[0], attn_weight_list[self.num_levels//2], attn_weight_list[-1]]
-                return F.log_softmax(o, dim=1).contiguous()
-            else:
-                y = self.tcanet(input) # input should have dimension (N, C, L)
-                # y = self.tcanet(emb.transpose(1, 2)) # input should have dimension (N, C, L)
-                o = self.decoder(y[:, :, -1])
-                return F.log_softmax(o, dim=1).contiguous()
 
-        emb = self.drop(self.word_encoder(input))
+        emb = self.drop(self.encoder(input.permute(0,2,1)))
         if self.temp_attn:
-            y, attn_weight_list = self.tcanet(emb.transpose(1, 2))
-            y = self.decoder(y.transpose(1, 2))
+            y, attn_weight_list = self.tcanet(emb)
+            y = self.decoder(y)
             return y.contiguous(), [attn_weight_list[0], attn_weight_list[self.num_levels//2], attn_weight_list[-1]]
         else:
-            y = self.tcanet(emb.transpose(1, 2))
-            y = self.decoder(y.transpose(1, 2))
+            y = self.tcanet(emb)
+            y = self.decoder(y)
             return y.contiguous()
 
+if __name__ == "__main__":
+    model = TCANet(emb_size=64, input_output_size=1, num_channels=[64, 64, 64, 64], num_features=6, num_sub_blocks=4,
+                   temp_attn=True, nheads=4, en_res=True, conv=True, key_size=64, kernel_size=2, dropout=0.3,
+                   wdrop=0.0, emb_dropout=0.1, tied_weights=False, dataset_name=None, visual=False)
+    x = torch.randn(16, 6, 30)
+    y = model(x)
+    print(y[0].size())

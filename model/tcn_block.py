@@ -28,14 +28,14 @@ class AttentionBlock(nn.Module):
 
     def forward(self, input):
         # input is dim (N, in_channels, T) where N is the batch_size, and T is the sequence length
-        mask = np.array([[1 if i>j else 0 for i in range(input.size(2))] for j in range(input.size(2))])
+        mask = np.array([[1 if i>j else 0 for i in range(input.size(1))] for j in range(input.size(1))])
         if input.is_cuda:
             mask = torch.ByteTensor(mask).cuda(input.get_device())
         else:
             mask = torch.ByteTensor(mask)
         # mask = mask.bool()
         
-        input = input.permute(0,2,1) # input: [N, T, inchannels]
+        # input: [N, T, inchannels]
         keys = self.linear_keys(input) # keys: (N, T, key_size)
         query = self.linear_query(input) # query: (N, T, key_size)
         values = self.linear_values(input) # values: (N, T, value_size)
@@ -115,8 +115,19 @@ class TemporalBlock(nn.Module):
             en_res_x = None
             if self.nheads > 1:
                 # will create some bugs when nheads>1
-                x_out = torch.cat([att(x) for att in self.attentions], dim=1)
-                out = self.net(self.linear_cat(x_out.transpose(1,2)).transpose(1,2))
+                zips = [att(x) for att in self.attentions]
+                attn_value = [i[0] for i in zips]
+                attn_weight = zips[0][-1]
+                x_out = torch.cat(attn_value, dim=1)
+                out_attn = self.linear_cat(x_out.transpose(1,2)).transpose(1,2)
+                if self.conv:
+                    out = self.net(out_attn)
+                else:
+                    out = out_attn
+                weight_x = F.softmax(attn_weight.sum(dim=2),dim=1)
+                en_res_x = weight_x.unsqueeze(2).repeat(1,1,x.size(2)) * x
+                en_res_x = en_res_x if self.downsample is None else self.downsample(en_res_x)
+
             else:
                 # x = x if self.downsample is None else self.downsample(x)
                 out_attn, attn_weight = self.attention(x)
@@ -125,7 +136,7 @@ class TemporalBlock(nn.Module):
                 else:
                     out = out_attn
                 weight_x = F.softmax(attn_weight.sum(dim=2),dim=1)
-                en_res_x = weight_x.unsqueeze(2).repeat(1,1,x.size(1)).transpose(1,2) * x
+                en_res_x = weight_x.unsqueeze(2).repeat(1,1,x.size(2)) * x
                 en_res_x = en_res_x if self.downsample is None else self.downsample(en_res_x)
                 
             res = x if self.downsample is None else self.downsample(x)
@@ -137,14 +148,14 @@ class TemporalBlock(nn.Module):
             del attn_weight
             
             if self.en_res:
-                return self.relu(out + res + en_res_x), attn_weight_cpu
+                return self.relu(out.transpose(1,2) + res + en_res_x), attn_weight_cpu
             else:
-                return self.relu(out + res), attn_weight_cpu
+                return self.relu(out.transpose(1,2) + res), attn_weight_cpu
 
         else:
             out = self.net(x)
             res = x if self.downsample is None else self.downsample(x)
-            return self.relu(out + res) # return: [N, emb_size, T]
+            return self.relu(out.transpose(1,2) + res) # return: [N, emb_size, T]
 
 class TemporalConvNet(nn.Module):
     def __init__(self, input_output_size, emb_size, num_channels, num_sub_blocks, temp_attn, nheads, en_res,
